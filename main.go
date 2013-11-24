@@ -1,19 +1,21 @@
 package main
 
 import (
-	"bytes"
-	"io"
 	"log"
-	"mime/multipart"
-	"net/http"
 	"os"
-	"path/filepath"
-	"net/url"
-	"jckhmmr/slingclient"
+	"github.com/ilikeorangutans/jckhmmr/slingclient"
 	"github.com/codegangsta/cli"
+	"net/url"
+	"path/filepath"
+	"github.com/howeyc/fsnotify"
 )
 
+var watcher fsnotify.Watcher
+
 func main() {
+
+	jckhmmr := &Jckhmmr{}
+
 	app := cli.NewApp()
 	app.Name = "jckhmmr"
 	app.Version = "0.0.1"
@@ -33,7 +35,7 @@ func main() {
 		cli.StringFlag{
 			Name: "password",
 			Value: "admin",
-			Usage: "Passowrd",
+			Usage: "Password",
 		},
 	}
 
@@ -51,93 +53,118 @@ func main() {
 					Usage: "File to upload",
 				},
 				cli.StringFlag {
-					Name: "",
-					Usage: "asdf",
+					Name: "t",
+					Value: "/path/in/jcr",
+					Usage: "Path in the JCR where the new file should live",
 				},
 			},
 		},
 		{
 			Name: "watch",
 			Usage: "Watch a directory and automatically mirror all changes",
-			Action: WatchDirectory,
+			Action: jckhmmr.WatchDirectory,
+		},
+		{
+			Name: "delete",
+			Usage: "Deletes path",
+			Action: DeletePath,
 		},
 	}
 
 	app.Run(os.Args)
 }
 
-func WatchDirectory(c *cli.Context) {
+type Jckhmmr struct {
 
-	dirPath := c.String("dir")
+	Watcher fsnotify.Watcher
+
+}
+
+func DeletePath(c *cli.Context) {
+
+	if len(c.Args()) < 1 {
+		log.Panic("Not enough paths given.")
+	}
+
+	path := c.Args()[0]
+	url, _ := url.Parse("http://localhost:8080")
+	sc := slingclient.NewSlingClient(*url, "/", "admin", "admin")
+	sc.DeletePath(path)
+}
+
+func (jckhmmr *Jckhmmr) WatchDirectory(c *cli.Context) {
+
+	if len(c.Args()) < 1 {
+		log.Panic("No directory given")
+	}
+
+	dirPath := c.Args()[0]
 	dir, err := os.Open(dirPath)
 	if err != nil {
 		log.Panic("Could not open directory")
 	}
+	defer dir.Close()
 
-	log.Print(dir)
+	absolutePath, _ := filepath.Abs(dir.Name())
+	log.Printf("Watching %s", absolutePath)
+
+	Watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	done := make(chan bool)
+
+	// Process events
+	go func() {
+		for {
+			select {
+			case ev := <-watcher.Event:
+				log.Println("event:", ev)
+			case err := <-watcher.Error:
+				log.Println("error:", err)
+			}
+		}
+	}()
+
+
+	filepath.Walk(absolutePath, jckhmmr.WalkAndScan)
+
+	err = Watcher.Watch(absolutePath)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	<-done
+
+	watcher.Close()
+
+}
+
+func (jckhmmr *Jckhmmr) WalkAndScan(path string, info os.FileInfo, err error) error {
+
+	if !info.IsDir() {
+		return nil;
+	}
+
+	// jckhmmr.Watcher.Watch(path)
+	log.Print(path)
+
+	return nil
 }
 
 func UploadFile(c * cli.Context) {
 
-	//slingclient.NewSlingClient("http://localhost:8080", "/", "admin", "admin", )
+	url, _ := url.Parse("http://localhost:8080")
+	sc := slingclient.NewSlingClient(*url, "/", "admin", "admin")
 
-	//log.Print("Uploading file")
-}
-
-
-func foo() {
-
-
-	port := os.Args[1]
-	node := os.Args[2]
-	fileToUpload := os.Args[3]
-
-	client := &http.Client{}
-
-	serverUrl, _ := url.Parse("http://localhost:8080/")
-	slingClient := slingclient.NewSlingClient(*serverUrl, "/tmp", "admin", "admin", "./")
-
-
-	buf := new(bytes.Buffer)
-
-	nodeName := filepath.Base(fileToUpload)
-	log.Printf("final node name %s", nodeName)
-
-	multiPartWriter := multipart.NewWriter(buf)
-	w, _ := multiPartWriter.CreateFormFile(fileToUpload, fileToUpload)
-
-	fd, err := os.Open(fileToUpload)
+	file, err := os.Open(c.String("f"))
 	if err != nil {
-		log.Fatalf("Could not open file %s", fileToUpload)
-	}
-	defer fd.Close()
-
-	slingClient.UploadFile(fd)
-
-	_, err = io.Copy(w, fd)
-	if err != nil {
-		log.Fatal("Error while copying file data")
-		return
-	}
-	multiPartWriter.WriteField(nodeName + "@TypeHint", "nt:file")
-
-	multiPartWriter.Close()
-	//log.Print(buf)
-
-	req, err := http.NewRequest("POST", "http://localhost:" + port + "/" + node, buf)
-	if err != nil {
-		log.Panic("Error creating requerst")
-	}
-	req.SetBasicAuth("admin", "admin")
-	req.Header.Add("Content-Type", multiPartWriter.FormDataContentType())
-
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Fatalf("error sending request: %s", err)
+		log.Panic("Could not open file")
 	}
 
-	log.Print(req)
-	log.Print(resp)
+	path := c.String("t")
 
+	sc.UploadFile(path, file)
 }
 
